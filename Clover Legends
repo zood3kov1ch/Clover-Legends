@@ -1,0 +1,729 @@
+pcall(function() if getgenv then
+  getgenv().__HKEY=""
+  getgenv().__HSID="45e234cb51444a418e1f2543c156f805"
+  getgenv().__HYBRID_WM="HYB-8d58b82966497b07ae451cde"
+  getgenv().__HYBRID_MODE="compat"
+  getgenv().__HB_SEATS=1
+end end)
+-- load library
+local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+-- create window
+local Window = Library:CreateWindow({
+    Title = "Hybrid-E-3",
+    Footer = "v2.6",
+    NotifySide = "Right",
+    ShowCustomCursor = true,
+})
+
+-- tabs
+local Tabs = {
+    Main = Window:AddTab("Main", "user"),
+    Stats = Window:AddTab("Stats", "bar-chart"),
+    AutoSpin = Window:AddTab("Auto Spin", "refresh-cw"),
+    ["UI Settings"] = Window:AddTab("UI Settings", "settings"),
+}
+
+-- services
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local LocalPlayer = Players.LocalPlayer
+local EnemiesFolder = workspace:WaitForChild("Enemies")
+local BasicAttack = ReplicatedStorage:WaitForChild("WK_Remotes"):WaitForChild("BasicAttack")
+local CastSkill = ReplicatedStorage:WaitForChild("WK_Remotes"):WaitForChild("CastSkill")
+local AssignStatPoint = ReplicatedStorage:WaitForChild("WK_Remotes"):WaitForChild("AssignStatPoint")
+local ShopSpin = ReplicatedStorage:WaitForChild("WK_Remotes"):WaitForChild("ShopSpin")
+local DropGrimoire = ReplicatedStorage:WaitForChild("WK_Remotes"):WaitForChild("DropGrimoire")
+
+-- permanent memory of enemy names
+local knownEnemies = {}
+
+local function getUniqueEnemyNames()
+    local names = {}
+    for name, _ in pairs(knownEnemies) do
+        table.insert(names, name)
+    end
+    return names
+end
+
+-- grimoire skills database (from game source)
+local grimoireSkills = {
+    Fire = {"Fireball", "FlameBurst", "FlameSnare"},
+    Wind = {"WindBlade", "TornadoPush", "WindMobility"},
+    Water = {"WaterShot", "WaterPrison", "WaterBarrier"},
+    Earth = {"StoneBullet", "EarthenRampart", "Earthquake"},
+    Lightning = {"Thunderbolt", "FlashStep", "ChainBolt"},
+    Plant = {"VineWhip", "SeedBomb", "BindingVines"},
+    WorldTree = {"RootSpear", "HealingGrove", "BindingRoots", "WorldTreeDescent"},
+    Light = {"LightSwords", "MirrorShift", "LightPrison", "DivineRain"},
+    Dark = {"DarkCloakedSlash", "BlackHole", "GravityZone", "DimensionSlash"},
+    Poison = {"PoisonSmash", "PoisonLob", "PoisonBurst"},
+    Chain = {"ChainSlam", "ChainPull", "ChainPrison"},
+    AntiMagic = {"SwordSlash", "BlackHurricane", "MagicNullZone", "BlackDivider"},
+    Star = {},
+    Time = {},
+}
+
+-- detect player's current grimoire
+local function detectPlayerGrimoire()
+    local grimoireName = nil
+
+    local playerStats = LocalPlayer:FindFirstChild("PlayerStats") or LocalPlayer:FindFirstChild("leaderstats")
+    if playerStats then
+        local val = playerStats:FindFirstChild("Grimoire") or playerStats:FindFirstChild("EquippedGrimoire") or playerStats:FindFirstChild("CurrentGrimoire")
+        if val then grimoireName = tostring(val.Value) end
+    end
+
+    local char = LocalPlayer.Character
+    if char and not grimoireName then
+        local val = char:FindFirstChild("Grimoire") or char:FindFirstChild("EquippedGrimoire")
+        if val then grimoireName = tostring(val.Value) end
+    end
+
+    if not grimoireName then
+        local backpack = LocalPlayer:FindFirstChild("Backpack")
+        if backpack then
+            for _, item in pairs(backpack:GetChildren()) do
+                if item:IsA("Tool") then
+                    for gType, _ in pairs(grimoireSkills) do
+                        if item.Name:lower():find(gType:lower()) then
+                            grimoireName = gType
+                            break
+                        end
+                    end
+                    if grimoireName then break end
+                end
+            end
+        end
+    end
+
+    if not grimoireName and char then
+        for _, item in pairs(char:GetChildren()) do
+            if item:IsA("Tool") then
+                for gType, _ in pairs(grimoireSkills) do
+                    if item.Name:lower():find(gType:lower()) then
+                        grimoireName = gType
+                        break
+                    end
+                end
+                if grimoireName then break end
+            end
+        end
+    end
+
+    return grimoireName
+end
+
+local function getPlayerSkills()
+    local grimoire = detectPlayerGrimoire()
+    if grimoire and grimoireSkills[grimoire] then
+        return grimoireSkills[grimoire], grimoire
+    end
+    local allSkills = {}
+    for _, skills in pairs(grimoireSkills) do
+        for _, skill in ipairs(skills) do
+            table.insert(allSkills, skill)
+        end
+    end
+    return allSkills, "Unknown"
+end
+
+-- available stats
+local availableStats = {
+    "ManaCapacity",
+    "Magic",
+    "Defense",
+    "Melee",
+}
+
+-- farm positions
+local farmPositions = {
+    "Above",
+    "Below",
+    "Behind",
+}
+
+-- helper functions
+local function getSelectedEnemies()
+    local selected = {}
+    local val = Options.TargetEnemies.Value
+    if type(val) == "table" then
+        for name, isSelected in pairs(val) do
+            if isSelected then table.insert(selected, name) end
+        end
+    end
+    return selected
+end
+
+local function getSelectedSkills()
+    local selected = {}
+    local val = Options.AutoSkills.Value
+    if type(val) == "table" then
+        for name, isSelected in pairs(val) do
+            if isSelected then table.insert(selected, name) end
+        end
+    end
+    return selected
+end
+
+local function getSelectedStats()
+    local selected = {}
+    local val = Options.SelectedStats.Value
+    if type(val) == "table" then
+        for name, isSelected in pairs(val) do
+            if isSelected then table.insert(selected, name) end
+        end
+    end
+    return selected
+end
+
+-- refresh enemies list
+local function refreshEnemiesList()
+    local hasNew = false
+    for _, enemy in pairs(EnemiesFolder:GetChildren()) do
+        if enemy:IsA("Model") and not knownEnemies[enemy.Name] then
+            knownEnemies[enemy.Name] = true
+            hasNew = true
+        end
+    end
+    if hasNew then
+        local currentSelections = {}
+        local val = Options.TargetEnemies.Value
+        if type(val) == "table" then
+            for k, v in pairs(val) do
+                if v then currentSelections[k] = true end
+            end
+        end
+        Options.TargetEnemies:SetValues(getUniqueEnemyNames())
+        if next(currentSelections) then
+            Options.TargetEnemies:SetValue(currentSelections)
+        end
+    end
+    return hasNew
+end
+
+-- ══════════════════════════════════════
+-- MAIN TAB
+-- ══════════════════════════════════════
+local MainGroup = Tabs.Main:AddLeftGroupbox("Auto Farm")
+
+MainGroup:AddToggle("AutoFarm", {
+    Text = "Auto Farm",
+    Default = false,
+    Tooltip = "automatically attacks selected enemies",
+})
+
+MainGroup:AddToggle("AutoSkill", {
+    Text = "Auto Skill",
+    Default = false,
+    Tooltip = "automatically casts selected skills",
+})
+
+MainGroup:AddDropdown("TargetEnemies", {
+    Values = getUniqueEnemyNames(),
+    Default = 1,
+    Multi = true,
+    Text = "Target Enemies",
+    Tooltip = "select which enemies to farm (leave empty for all)",
+    Searchable = true,
+})
+
+MainGroup:AddButton({
+    Text = "Refresh Enemies",
+    Func = function()
+        refreshEnemiesList()
+        Library:Notify({
+            Title = "Enemies Refreshed",
+            Description = "Found " .. #getUniqueEnemyNames() .. " enemy types",
+            Time = 3,
+        })
+    end,
+    Tooltip = "manually refresh the enemy list",
+})
+
+local skills, currentGrimoire = getPlayerSkills()
+
+MainGroup:AddDropdown("AutoSkills", {
+    Values = skills,
+    Default = 1,
+    Multi = true,
+    Text = "Auto Skills (" .. currentGrimoire .. ")",
+    Tooltip = "select which skills to auto cast",
+    Searchable = false,
+})
+
+MainGroup:AddButton({
+    Text = "Refresh Skills",
+    Func = function()
+        local newSkills, newGrimoire = getPlayerSkills()
+        Options.AutoSkills:SetValues(newSkills)
+        Options.AutoSkills:SetText("Auto Skills (" .. newGrimoire .. ")")
+        Library:Notify({
+            Title = "Skills Refreshed",
+            Description = "Detected: " .. newGrimoire .. " (" .. #newSkills .. " skills)",
+            Time = 3,
+        })
+    end,
+    Tooltip = "re-detect grimoire and update skills",
+})
+
+MainGroup:AddDropdown("FarmPosition", {
+    Values = farmPositions,
+    Default = 1,
+    Multi = false,
+    Text = "Farm Position",
+    Tooltip = "where to position yourself relative to the enemy",
+})
+
+MainGroup:AddSlider("FarmHeight", {
+    Text = "Farm Height",
+    Default = 5,
+    Min = 1,
+    Max = 50,
+    Rounding = 0,
+    Tooltip = "vertical distance from enemy (used for Above/Below/Behind)",
+})
+
+MainGroup:AddSlider("TweenSpeed", {
+    Text = "Tween Speed",
+    Default = 0.3,
+    Min = 0.1,
+    Max = 2.0,
+    Rounding = 1,
+    Tooltip = "how fast you tween to enemies",
+})
+
+MainGroup:AddSlider("SkillCooldown", {
+    Text = "Skill Cooldown",
+    Default = 0.5,
+    Min = 0.1,
+    Max = 5.0,
+    Rounding = 1,
+    Tooltip = "delay between skill casts",
+})
+
+MainGroup:AddLabel("Farm Keybind"):AddKeyPicker("FarmKey", {
+    Default = "F",
+    Mode = "Toggle",
+    Text = "Toggle Auto Farm",
+})
+
+local StatusLabel = MainGroup:AddLabel("Status: Idle")
+
+-- Auto Sell Section (Added per request)
+local SellGroup = Tabs.Main:AddRightGroupbox("Auto Sell")
+SellGroup:AddToggle("EnableAutoSell", {
+    Text = "Enable Auto Sell",
+    Default = false,
+    Tooltip = "automatically sells selected items",
+})
+SellGroup:AddDropdown("AutoSellItems", {
+    Values = {"Common", "Uncommon", "Rare", "Epic", "Legendary"}, -- Replace with actual in-game item names/rarities
+    Default = 1,
+    Multi = true,
+    Text = "Items to Sell",
+    Tooltip = "select which items/rarities to auto sell",
+    Searchable = true,
+})
+-- Note: Add your FireServer logic for selling inside the main farm loop if the game supports it.
+
+-- ══════════════════════════════════════
+-- STATS TAB
+-- ══════════════════════════════════════
+local StatsGroup = Tabs.Stats:AddLeftGroupbox("Stat Points")
+
+StatsGroup:AddDropdown("SelectedStats", {
+    Values = availableStats,
+    Default = 1,
+    Multi = true,
+    Text = "Select Stats",
+    Tooltip = "choose which stats to modify",
+})
+
+StatsGroup:AddToggle("AutoStat", {
+    Text = "Auto Add Stats",
+    Default = false,
+    Tooltip = "automatically adds to selected stats",
+})
+
+StatsGroup:AddSlider("AutoStatAmount", {
+    Text = "Auto Stat Amount",
+    Default = 999,
+    Min = 1,
+    Max = 9999,
+    Rounding = 0,
+    Tooltip = "amount to add per tick",
+})
+
+local StatStatusLabel = StatsGroup:AddLabel("Stats: Idle")
+
+-- auto stat loop
+task.spawn(function()
+    while true do
+        if Toggles.AutoStat.Value then
+            local selectedStats = getSelectedStats()
+            local amount = Options.AutoStatAmount.Value
+            if #selectedStats > 0 then
+                for _, stat in ipairs(selectedStats) do
+                    AssignStatPoint:FireServer(stat, amount)
+                end
+                StatStatusLabel:SetText("Stats: Adding " .. amount .. " to " .. #selectedStats .. " stats")
+            else
+                StatStatusLabel:SetText("Stats: No stats selected")
+            end
+        else
+            StatStatusLabel:SetText("Stats: Idle")
+        end
+        task.wait(0.1)
+    end
+end)
+
+-- ══════════════════════════════════════
+-- AUTO SPIN TAB
+-- ══════════════════════════════════════
+local SpinGroup = Tabs.AutoSpin:AddLeftGroupbox("Grimoire Spin")
+
+SpinGroup:AddToggle("AutoSpin", {
+    Text = "Auto Spin",
+    Default = false,
+    Tooltip = "automatically spins for a new grimoire using gems",
+})
+
+SpinGroup:AddSlider("SpinDelay", {
+    Text = "Spin Delay (s)",
+    Default = 0.5,
+    Min = 0.1,
+    Max = 5.0,
+    Rounding = 1,
+    Tooltip = "delay between each spin attempt",
+})
+
+SpinGroup:AddToggle("SpinUntilTarget", {
+    Text = "Stop on Target Grimoire",
+    Default = false,
+    Tooltip = "stops spinning when the target grimoire is detected",
+})
+
+SpinGroup:AddDropdown("TargetGrimoire", {
+    Values = {"Fire", "Wind", "Water", "Earth", "Lightning", "Plant", "WorldTree", "Light", "Dark", "Poison", "Chain", "AntiMagic", "Star", "Time"},
+    Default = 1,
+    Multi = true, -- Changed to true for multi-select
+    Text = "Target Grimoire(s)",
+    Tooltip = "which grimoire(s) to stop at (requires Stop on Target toggle)",
+    Searchable = false,
+})
+
+local SpinCountLabel = SpinGroup:AddLabel("Spins: 0 | Current: Unknown")
+
+-- ── Drop Grimoire ──
+local DropGroup = Tabs.AutoSpin:AddRightGroupbox("Drop Grimoire")
+
+DropGroup:AddDropdown("DropTarget", {
+    Values = {"Fire", "Wind", "Water", "Earth", "Lightning", "Plant", "WorldTree", "Light", "Dark", "Poison", "Chain", "AntiMagic", "Star", "Time"},
+    Default = 1,
+    Multi = true, -- Changed to true for multi-select
+    Text = "Grimoire(s) to Drop",
+    Tooltip = "which grimoire ID(s) to pass to the drop remote",
+    Searchable = false,
+})
+
+DropGroup:AddToggle("AutoDrop", {
+    Text = "Auto Drop",
+    Default = false,
+    Tooltip = "automatically drops the selected grimoire after each spin",
+})
+
+DropGroup:AddButton({
+    Text = "Drop Now",
+    Func = function()
+        local ids = Options.DropTarget.Value
+        if type(ids) == "table" then
+            for _, id in ipairs(ids) do
+                DropGrimoire:FireServer({ Id = id })
+            end
+            Library:Notify({
+                Title = "Grimoires Dropped",
+                Description = "Dropped: " .. table.concat(ids, ", "),
+                Time = 3,
+            })
+        else
+            DropGrimoire:FireServer({ Id = ids })
+            Library:Notify({
+                Title = "Grimoire Dropped",
+                Description = "Dropped: " .. ids,
+                Time = 3,
+            })
+        end
+    end,
+    Tooltip = "manually fire the drop remote once",
+})
+
+-- spin counter and loop
+local spinCount = 0
+
+task.spawn(function()
+    while true do
+        if Toggles.AutoSpin.Value then
+            -- fire the spin event
+            ShopSpin:FireServer({ Mode = "Gems" })
+            spinCount = spinCount + 1
+
+            -- auto drop if enabled
+            if Toggles.AutoDrop.Value then
+                local dropIds = Options.DropTarget.Value
+                if type(dropIds) == "table" then
+                    for _, id in ipairs(dropIds) do
+                        DropGrimoire:FireServer({ Id = id })
+                    end
+                else
+                    DropGrimoire:FireServer({ Id = dropIds })
+                end
+            end
+
+            -- check current grimoire for target detection
+            local current = detectPlayerGrimoire() or "Unknown"
+            SpinCountLabel:SetText("Spins: " .. spinCount .. " | Current: " .. current)
+
+            -- stop if we hit the target (don't drop if it's the one we want)
+            if Toggles.SpinUntilTarget.Value then
+                local targets = Options.TargetGrimoire.Value
+                local isTarget = false
+                
+                if type(targets) == "table" then
+                    for _, t in ipairs(targets) do
+                        if current == t then
+                            isTarget = true
+                            break
+                        end
+                    end
+                else
+                    isTarget = (current == targets)
+                end
+
+                if isTarget then
+                    Toggles.AutoSpin:SetValue(false)
+                    Toggles.AutoDrop:SetValue(false)
+                    local targetStr = type(targets) == "table" and table.concat(targets, ", ") or targets
+                    Library:Notify({
+                        Title = "Target Reached!",
+                        Description = "Got " .. current .. " after " .. spinCount .. " spins.",
+                        Time = 5,
+                    })
+                end
+            end
+
+            task.wait(Options.SpinDelay.Value)
+        else
+            task.wait(0.1)
+        end
+    end
+end)
+
+SpinGroup:AddButton({
+    Text = "Reset Spin Count",
+    Func = function()
+        spinCount = 0
+        local current = detectPlayerGrimoire() or "Unknown"
+        SpinCountLabel:SetText("Spins: 0 | Current: " .. current)
+    end,
+    Tooltip = "reset the spin counter back to zero",
+})
+
+-- ══════════════════════════════════════
+-- AUTO FARM LOGIC
+-- ══════════════════════════════════════
+local function getNearestTarget()
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+
+    local myPos = char.HumanoidRootPart.Position
+    local nearest = nil
+    local minDist = math.huge
+    local selectedNames = getSelectedEnemies()
+
+    for _, enemy in pairs(EnemiesFolder:GetChildren()) do
+        if enemy:IsA("Model") and enemy:FindFirstChild("HumanoidRootPart") and enemy:FindFirstChild("Humanoid") then
+            local hum = enemy.Humanoid
+            if hum.Health > 0 then
+                local isTarget = (#selectedNames == 0)
+                if not isTarget then
+                    for _, name in ipairs(selectedNames) do
+                        if enemy.Name == name then
+                            isTarget = true
+                            break
+                        end
+                    end
+                end
+                if isTarget then
+                    local dist = (enemy.HumanoidRootPart.Position - myPos).Magnitude
+                    if dist < minDist then
+                        minDist = dist
+                        nearest = enemy
+                    end
+                end
+            end
+        end
+    end
+
+    return nearest
+end
+
+local currentTween = nil
+
+local function getFarmCFrame(enemyRoot)
+    local pos = Options.FarmPosition.Value
+    local height = Options.FarmHeight.Value
+    local enemyPos = enemyRoot.Position
+
+    if pos == "Above" then
+        return CFrame.new(enemyPos + Vector3.new(0, height, 0))
+    elseif pos == "Below" then
+        return CFrame.new(enemyPos + Vector3.new(0, -height, 0))
+    elseif pos == "Behind" then
+        local behindOffset = enemyRoot.CFrame.LookVector * -8
+        return CFrame.new(enemyPos + behindOffset + Vector3.new(0, height, 0))
+    end
+
+    return CFrame.new(enemyPos + Vector3.new(0, height, 0))
+end
+
+local function tweenTo(enemyRoot)
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+
+    if currentTween then
+        currentTween:Cancel()
+    end
+
+    local speed = Options.TweenSpeed.Value
+    local tweenInfo = TweenInfo.new(speed, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+    local goalCFrame = getFarmCFrame(enemyRoot)
+    local goal = { CFrame = goalCFrame }
+
+    currentTween = TweenService:Create(char.HumanoidRootPart, tweenInfo, goal)
+    currentTween:Play()
+end
+
+-- auto refresh enemies every 2 seconds
+task.spawn(function()
+    while true do
+        task.wait(2)
+        refreshEnemiesList()
+    end
+end)
+
+-- auto refresh skills every 3 seconds
+task.spawn(function()
+    while true do
+        task.wait(3)
+        local newSkills, newGrimoire = getPlayerSkills()
+        local currentText = Options.AutoSkills.Text or ""
+        if not currentText:find(newGrimoire) then
+            Options.AutoSkills:SetValues(newSkills)
+            Options.AutoSkills:SetText("Auto Skills (" .. newGrimoire .. ")")
+        end
+    end
+end)
+
+-- main farm loop
+local lastSkillTime = 0
+
+task.spawn(function()
+    while true do
+        local now = tick()
+        local char = LocalPlayer.Character
+        local rootPart = char and char:FindFirstChild("HumanoidRootPart")
+
+        if Toggles.AutoFarm.Value or Toggles.AutoSkill.Value then
+            local enemy = getNearestTarget()
+
+            if enemy and rootPart then
+                local enemyRoot = enemy.HumanoidRootPart
+
+                if Toggles.AutoFarm.Value then
+                tweenTo(enemyRoot)
+
+                BasicAttack:FireServer(
+                enemyRoot.CFrame,
+                nil,
+                enemyRoot.Position,
+                1
+                )
+                StatusLabel:SetText("Status: M1 on " .. enemy.Name)
+                end
+                
+                if Toggles.AutoSkill.Value and now - lastSkillTime >= Options.SkillCooldown.Value then
+                    local selectedSkills = getSelectedSkills()
+                    
+                    for _, skillName in ipairs(selectedSkills) do
+                        CastSkill:FireServer(
+                            skillName,
+                            rootPart.CFrame,
+                            enemyRoot.Position
+                        )
+                    end
+                    
+                    lastSkillTime = now
+                    
+                    if #selectedSkills > 0 then
+                        StatusLabel:SetText("Status: Casting " .. table.concat(selectedSkills, ", "))
+                    end
+                end
+            else
+                StatusLabel:SetText("Status: No targets found")
+            end
+        else
+            StatusLabel:SetText("Status: Idle")
+            if currentTween then
+                currentTween:Cancel()
+            end
+        end
+        task.wait(0.1)
+    end
+end)
+
+-- ══════════════════════════════════════
+-- UI SETTINGS TAB
+-- ══════════════════════════════════════
+local MenuGroup = Tabs["UI Settings"]:AddLeftGroupbox("Menu")
+
+MenuGroup:AddToggle("ShowCustomCursor", {
+    Text = "Custom Cursor",
+    Default = true,
+    Callback = function(Value)
+        Library.ShowCustomCursor = Value
+    end,
+})
+
+MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", {
+    Default = "RightShift",
+    NoUI = true,
+    Text = "Menu keybind"
+})
+
+MenuGroup:AddButton("Unload", function()
+    Library:Unload()
+end)
+
+Library.ToggleKeybind = Options.MenuKeybind
+
+-- theme and save managers
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({"MenuKeybind"})
+ThemeManager:SetFolder("AutoFarm")
+SaveManager:SetFolder("AutoFarm/configs")
+SaveManager:BuildConfigSection(Tabs["UI Settings"])
+ThemeManager:ApplyToTab(Tabs["UI Settings"])
+SaveManager:LoadAutoloadConfig()
+--__HYB_OK__
+--__HYB_END__
